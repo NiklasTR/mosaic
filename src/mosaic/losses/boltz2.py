@@ -1,3 +1,4 @@
+import logging
 from dataclasses import asdict, dataclass
 from functools import cached_property
 from pathlib import Path
@@ -14,7 +15,7 @@ import torch
 from boltz.model.models.boltz2 import Boltz2
 from boltz.data.const import ref_atoms
 from jax import numpy as jnp
-from jaxtyping import Array, Float, PyTree
+from jaxtyping import Array, Bool, Float, PyTree
 from joltz import TrunkState
 
 
@@ -22,10 +23,12 @@ from ..common import LinearCombination, LossTerm
 from ..util import pairwise_distance
 from .structure_prediction import AbstractStructureOutput, predicted_tm_score
 
+_LOG = logging.getLogger(__name__)
+
 
 def load_boltz2(checkpoint_path=Path("~/.boltz/boltz2_conf.ckpt").expanduser()):
     if not checkpoint_path.exists():
-        print(f"Downloading Boltz checkpoint to {checkpoint_path}")
+        _LOG.info("Downloading Boltz checkpoint to %s", checkpoint_path)
         cache = checkpoint_path.parent
         cache.mkdir(parents=True, exist_ok=True)
         boltz_main.download_boltz2(cache)
@@ -63,7 +66,7 @@ class StructureWriter:
     atom_pad_mask: torch.Tensor
     record: any
     out_dir: str
-    temp_dir_handle: TemporaryDirectory
+    temp_dir_handle: TemporaryDirectory | None
 
     def __init__(
         self,
@@ -71,7 +74,7 @@ class StructureWriter:
         features_dict,
         target_dir: Path,
         output_dir: Path,
-        temp_dir_handle: TemporaryDirectory,
+        temp_dir_handle: TemporaryDirectory | None,
     ):
         self.writer = boltz_main.BoltzWriter(
             data_dir=target_dir,
@@ -110,14 +113,20 @@ class StructureWriter:
 def load_features_and_structure_writer(
     input_yaml_str: str,
     cache=Path("~/.boltz/").expanduser(),
+    *,
+    preprocess_out_dir: Path | None = None,
+    input_stem: str = "input",
 ) -> PyTree:
-    print("Loading data")
-    out_dir_handle = (
-        TemporaryDirectory()
-    )  # this is sketchy -- we have to remember not to let this get garbage collected
-    out_dir = Path(out_dir_handle.name)
-    # dump the yaml to a file
-    input_data_path = out_dir / "input.yaml"
+    _LOG.info("Loading data")
+    if preprocess_out_dir is not None:
+        out_dir = Path(preprocess_out_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir_handle = None
+    else:
+        out_dir_handle = TemporaryDirectory()
+        out_dir = Path(out_dir_handle.name)
+    stem = input_stem.replace("/", "_").replace("\\", "_")
+    input_data_path = out_dir / f"{stem}.yaml"
     input_data_path.write_text(input_yaml_str)
     data = boltz_main.check_inputs(input_data_path)
     # Process inputs
@@ -137,7 +146,7 @@ def load_features_and_structure_writer(
     # Load processed data
     processed_dir = out_dir / "processed"
     if manifest is None:
-        print("Something odd happened with manifest, trying to reload.")
+        _LOG.warning("Something odd happened with manifest, trying to reload.")
         manifest = boltz_main.Manifest.load(processed_dir / "manifest.json")
 
     processed = boltz_main.BoltzProcessedInput(
@@ -197,9 +206,13 @@ def load_features_and_structure_writer(
 def set_binder_sequence(
     new_sequence: Float[Array, "N 20"],
     features: PyTree,
+    design_mask: Bool[Array, "N"] | None = None,
 ):
-    """Replace features related to first N tokens with `new_sequence.` Used for hallucination/binder design."""
-    # features = jax.tree.map(lambda v: v.astype(jnp.float32), features)
+    """Replace features related to first N tokens with `new_sequence`.
+
+    If ``design_mask`` is True for a position, that row is updated from ``new_sequence``;
+    otherwise the existing ``res_type`` / ``msa`` / ``profile`` rows are kept (scaffold).
+    """
     features["res_type"] = features["res_type"].astype(jnp.float32)
     features["msa"] = features["msa"].astype(jnp.float32)
     features["profile"] = features["profile"].astype(jnp.float32)
@@ -207,23 +220,34 @@ def set_binder_sequence(
     assert new_sequence.shape[1] == 20
     binder_len = new_sequence.shape[0]
 
-    # We only use the standard 20 amino acids, but boltz has 33 total tokens.
-    # zero out non-standard AA types
     zero_padded_sequence = jnp.pad(new_sequence, ((0, 0), (2, 11)))
     n_msa = features["msa"].shape[1]
-    print("n_msa", n_msa)
+    _LOG.debug("n_msa %s", n_msa)
 
-    # We assume there are no MSA hits for the binder sequence
-    binder_profile = jnp.zeros_like(features["profile"][0, :binder_len])
-    binder_profile = binder_profile.at[:binder_len].set(zero_padded_sequence) / n_msa
-    binder_profile = binder_profile.at[:, 1].set((n_msa - 1) / n_msa)
+    binder_profile_new = jnp.zeros_like(features["profile"][0, :binder_len])
+    binder_profile_new = binder_profile_new.at[:binder_len].set(zero_padded_sequence) / n_msa
+    binder_profile_new = binder_profile_new.at[:, 1].set((n_msa - 1) / n_msa)
 
+    if design_mask is None:
+        return features | {
+            "res_type": features["res_type"]
+            .at[0, :binder_len, :]
+            .set(zero_padded_sequence),
+            "msa": features["msa"].at[0, 0, :binder_len, :].set(zero_padded_sequence),
+            "profile": features["profile"].at[0, :binder_len].set(binder_profile_new),
+        }
+
+    m = design_mask.astype(jnp.bool_)[:, None]
+    old_rt = features["res_type"][0, :binder_len]
+    old_msa = features["msa"][0, 0, :binder_len, :]
+    old_prof = features["profile"][0, :binder_len]
+    merged_rt = jnp.where(m, zero_padded_sequence, old_rt)
+    merged_msa = jnp.where(m, zero_padded_sequence, old_msa)
+    merged_prof = jnp.where(m, binder_profile_new, old_prof)
     return features | {
-        "res_type": features["res_type"]
-        .at[0, :binder_len, :]
-        .set(zero_padded_sequence),
-        "msa": features["msa"].at[0, 0, :binder_len, :].set(zero_padded_sequence),
-        "profile": features["profile"].at[0, :binder_len].set(binder_profile),
+        "res_type": features["res_type"].at[0, :binder_len, :].set(merged_rt),
+        "msa": features["msa"].at[0, 0, :binder_len, :].set(merged_msa),
+        "profile": features["profile"].at[0, :binder_len].set(merged_prof),
     }
 
 
@@ -256,7 +280,7 @@ class Boltz2Output(AbstractStructureOutput):
 
     @cached_property
     def trunk_state(self):
-        print("JIT compiling trunk module...")
+        _LOG.info("JIT compiling trunk module...")
 
         def body_fn(carry, _):
             trunk_state, key = carry
@@ -296,7 +320,7 @@ class Boltz2Output(AbstractStructureOutput):
 
     @cached_property
     def structure_coordinates(self):
-        print("JIT compiling structure module...")
+        _LOG.info("JIT compiling structure module...")
         q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
             self.joltz2.diffusion_conditioning(
                 self.trunk_state.s,
@@ -326,7 +350,7 @@ class Boltz2Output(AbstractStructureOutput):
 
     @cached_property
     def confidence_metrics(self) -> joltz.ConfidenceMetrics:
-        print("JIT compiling confidence module...")
+        _LOG.info("JIT compiling confidence module...")
         return self.joltz2.confidence_module(
             s_inputs=self.initial_embedding.s_inputs,
             s=self.trunk_state.s,
@@ -384,11 +408,13 @@ class Boltz2Loss(LossTerm):
     sampling_steps: int = 25
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
+    binder_design_mask: Bool[Array, "N"] | None = None
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
-        # Set the binder sequence in the features
-        features = set_binder_sequence(sequence, self.features)
+        features = set_binder_sequence(
+            sequence, self.features, design_mask=self.binder_design_mask
+        )
 
         # initialize lazy output object
         output = Boltz2Output(
@@ -443,7 +469,7 @@ class Boltz2FromTrunkOutput(eqx.Module):
 
     @cached_property
     def structure_coordinates(self):
-        print("JIT compiling structure module...")
+        _LOG.info("JIT compiling structure module...")
         q, c, to_keys, atom_enc_bias, atom_dec_bias, token_trans_bias = (
             self.joltz2.diffusion_conditioning(
                 self.trunk_state.s,
@@ -473,7 +499,7 @@ class Boltz2FromTrunkOutput(eqx.Module):
 
     @cached_property
     def confidence_metrics(self) -> joltz.ConfidenceMetrics:
-        print("JIT compiling confidence module...")
+        _LOG.info("JIT compiling confidence module...")
         return self.joltz2.confidence_module(
             s_inputs=self.initial_embedding.s_inputs,
             s=self.trunk_state.s,
@@ -530,6 +556,7 @@ class MultiSampleBoltz2Loss(LossTerm):
     num_samples: int = 4
     name: str = "boltz2multi"
     initial_recycling_state: TrunkState | None = None
+    binder_design_mask: Bool[Array, "N"] | None = None
     reduction: any = jnp.mean
     """
         Run the structure and confidence modules multiple times from the same trunk output.
@@ -539,8 +566,9 @@ class MultiSampleBoltz2Loss(LossTerm):
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
-        # Set the binder sequence in the features
-        features = set_binder_sequence(sequence, self.features)
+        features = set_binder_sequence(
+            sequence, self.features, design_mask=self.binder_design_mask
+        )
 
         # initialize lazy output object
         output = Boltz2Output(

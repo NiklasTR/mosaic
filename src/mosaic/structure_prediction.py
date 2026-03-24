@@ -26,6 +26,10 @@ class TargetChain:
     polymer_type: str = PolymerType.PROTEIN
     use_msa: bool = True
     template_chain: gemmi.Chain | None = None
+    # Boltz-2 YAML: head-to-tail cyclic peptide for this chain (ignored by AF2 / Protenix).
+    cyclic_peptide: bool = False
+    # Boltz-2 YAML: path to precomputed MSA (.a3m or .csv). When set, overrides ColabFold fetch.
+    msa_path: str | None = None
 
 
 class StructurePrediction(eqx.Module):
@@ -33,6 +37,9 @@ class StructurePrediction(eqx.Module):
     plddt: Float[Array, "N"]
     pae: Float[Array, "N N"]
     iptm: float
+    # Boltz-2 predict() fills these; other backends leave NaN.
+    bt_ipsae: float = float("nan")
+    tb_ipsae: float = float("nan")
 
 
 class StructurePredictionModel(eqx.Module):

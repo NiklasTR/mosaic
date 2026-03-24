@@ -33,9 +33,29 @@ There has been a recent explosion in the application of machine learning to prot
 
 
 ### Installation
-We recommend using `uv`, e.g. run `uv sync --group jax-cuda` after cloning the repo to install dependencies.
+We recommend using `uv` from this directory. **The default install includes JAX, Boltz-1/2 via `joltz` + PyPI `boltz` + PyTorch.** The resolved `uv.lock` uses **CPU** PyTorch wheels: `uv lock` merges every optional extra, and **`openfold3` (`jopenfold3`) pins `torch` to the `pytorch-cpu` index**, so the lock cannot mix in a Linux-only `cu130` index for the same resolve. On **Linux GPU** nodes, reinstall CUDA 13 PyTorch after sync (see `configs/launcher/aithyra-1gpu.yaml`). Use **`--group jax-cuda`** for **`jax[cuda13]`**, matching `packages/thermax`’s `cuda13` optional. Install **Protenix** separately if you use `mosaic.models.protenix` / `protenij`. Add extras for other backends:
 
-To run the example notebook try `uv run marimo edit examples/example_notebook.py`.
+| Extra | Purpose |
+| :--- | :--- |
+| *(default)* | AF2 stack, `joltz`, `torch`, Boltz inference (`mosaic.losses.boltz` / `boltz2`), core losses |
+| `boltzgen` | BoltzGen (`joltzgen`) |
+| `openfold3` | OpenFold3 (`jopenfold3`) |
+| `esm2` | ESM-2 via `esm2quinox` |
+| `esmc` | ESMC via `esmj` (do not combine with `esm2` in one env — uv marks them conflicting) |
+| `ablang` | AbLang losses |
+| `notebooks` | `marimo`, `ipymolstar`, `matplotlib` |
+| `hydra` | Hydra + Submitit launcher |
+| `all` | Optional deps except `esmc` and `openfold3` (`esm2`/`esmc` conflict under uv; OF3 is `--extra openfold3`) |
+
+Examples:
+
+```bash
+uv sync --group jax-cuda
+uv sync --group jax-cuda --extra hydra
+uv sync --group jax-cuda --extra hydra --extra notebooks
+```
+
+To run the example notebook try `uv run marimo edit examples/example_notebook.py` (install `notebooks` extra first).
 
 > You may need to add various `uv` overrides for specific packages and your machine, take a look at [pyproject.toml](pyproject.toml)
 

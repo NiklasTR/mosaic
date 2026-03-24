@@ -1,3 +1,5 @@
+import logging
+
 import equinox as eqx
 import jax
 import numpy as np
@@ -7,6 +9,8 @@ from typing import Callable
 from mosaic.common import is_state_update, has_state_index, LossTerm, LinearCombination
 
 import time
+
+_LOG = logging.getLogger(__name__)
 AbstractLoss = LossTerm | LinearCombination
 
 
@@ -16,10 +20,10 @@ def _print_iter(iter, aux, v):
         aux,
         lambda v: isinstance(v, float | str) or v.shape == (),
     )
-    print(
-        iter,
+    parts = [
+        str(iter),
         f"loss: {v:0.2f}",
-        " ".join(
+        *[
             f"{jax.tree_util.keystr(k, simple=True, separator='.')}:{v: 0.2f}"
             for (k, v) in jax.tree_util.tree_leaves_with_path(aux)
             if hasattr(v, "item")
@@ -27,8 +31,9 @@ def _print_iter(iter, aux, v):
             and (
                 "state_index" not in jax.tree_util.keystr(k, simple=True, separator=".")
             )
-        ),
-    )
+        ],
+    ]
+    _LOG.info(" ".join(parts))
 
 
 # Split this up so changing optim parameters doesn't trigger re-compilation of loss function
@@ -190,13 +195,13 @@ def gradient_MCMC(
                 proposal = proposal.at[position].set(AA)
             # check if proposal is same as current sequence
             if np.all(proposal == sequence):
-                print(f"\t {i}: proposal is the same as current sequence, skipping.")
+                _LOG.info("\t %s: proposal is the same as current sequence, skipping.", i)
                 #_print_iter(iter, {"": aux_0, "time": time.time() - start_time}, v_0)
                 #continue
             else:
                 break
         muts = ", ".join([f"{pos}:{aa}" for (pos, aa) in mutations])
-        print(f"Proposed mutations: {muts}")
+        _LOG.info("Proposed mutations: %s", muts)
         
         ### evaluate the proposal
         (v_1, aux_1), g_1 = _eval_loss_and_grad(
@@ -218,12 +223,15 @@ def gradient_MCMC(
 
         log_acceptance_probability = min(0.0, log_acceptance_probability)
 
-        print(
-            f"iter: {iter}, accept {np.exp(log_acceptance_probability): 0.3f} {v_0: 0.3f} {v_1: 0.3f} {log_q_forward: 0.3f} {log_q_backward: 0.3f}"
+        _LOG.info(
+            "iter: %s, accept %s %s %s %s %s",
+            iter,
+            f"{np.exp(log_acceptance_probability): 0.3f}",
+            f"{v_0: 0.3f}",
+            f"{v_1: 0.3f}",
+            f"{log_q_forward: 0.3f}",
+            f"{log_q_backward: 0.3f}",
         )
-
-        
-        print()
         if -jax.random.exponential(key=key) < log_acceptance_probability:
             sequence = proposal
             (v_0, aux_0), g_0 = (v_1, aux_1), g_1

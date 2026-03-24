@@ -1,3 +1,4 @@
+import logging
 from dataclasses import asdict, dataclass
 from functools import cached_property
 from pathlib import Path
@@ -29,6 +30,8 @@ from ..common import LinearCombination, LossTerm
 
 from .structure_prediction import AbstractStructureOutput
 
+_LOG = logging.getLogger(__name__)
+
 
 def load_boltz(
     checkpoint_path: Path = Path("~/.boltz/boltz1_conf.ckpt").expanduser(),
@@ -39,7 +42,7 @@ def load_boltz(
         "diffusion_samples": 1,
     }
     if not checkpoint_path.exists():
-        print(f"Downloading Boltz checkpoint to {checkpoint_path}")
+        _LOG.info("Downloading Boltz checkpoint to %s", checkpoint_path)
         cache = checkpoint_path.parent
         cache.mkdir(parents=True, exist_ok=True)
         download(cache)
@@ -310,7 +313,7 @@ def load_features_and_structure_writer(
     input_yaml_str: str,
     cache=Path("~/.boltz/").expanduser(),
 ) -> tuple[PyTree, StructureWriter]:
-    print("Loading data")
+    _LOG.info("Loading data")
     out_dir_handle = (
         TemporaryDirectory()
     )  # this is sketchy -- we have to remember not to let this get garbage collected
@@ -379,7 +382,7 @@ def set_binder_sequence(
     # zero out non-standard AA types
     zero_padded_sequence = jnp.pad(new_sequence, ((0, 0), (2, 11)))
     n_msa = features["msa"].shape[1]
-    print("n_msa", n_msa)
+    _LOG.debug("n_msa %s", n_msa)
 
     # We assume there are no MSA hits for the binder sequence
     binder_profile = jnp.zeros_like(features["profile"][0, :binder_len])
@@ -435,7 +438,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @cached_property
     def structure_outputs(self) -> joltz.StructureModuleOutputs:
-        print("JIT compiling boltz1 structure module...")
+        _LOG.info("JIT compiling boltz1 structure module...")
         return self.joltz.sample_structure(
             self.features,
             self.trunk_outputs,
@@ -445,7 +448,7 @@ class Boltz1Output(AbstractStructureOutput):
 
     @cached_property
     def confidence_outputs(self) -> PyTree:
-        print("JIT compiling boltz1 confidence module...")
+        _LOG.info("JIT compiling boltz1 confidence module...")
         return self.joltz.predict_confidence(
             self.features,
             self.trunk_outputs,

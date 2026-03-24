@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import gemmi
 
-from ..common import LossTerm
+from ..common import TOKENS, LossTerm
 
 
 # Each structure prediction model (AF2, boltz, boltz2, etc.) implements this interface for loss functionals
@@ -253,6 +253,24 @@ class BinderTargetContact(LossTerm):
         return -average_log_prob, {"target_contact": average_log_prob}
 
 
+class ExpectedCysteineCountLoss(LossTerm):
+    """Penalize squared deviation of summed soft cysteine probability from a target count."""
+
+    target_expected_cys: float
+
+    def __call__(
+        self,
+        sequence: Float[Array, "N 20"],
+        output: AbstractStructureOutput,
+        key,
+    ):
+        cys = TOKENS.index("C")
+        expected = sequence[:, cys].sum()
+        err = expected - jnp.array(self.target_expected_cys, dtype=expected.dtype)
+        sq = err * err
+        return sq, {"expected_cys": expected, "cys_count_sqerr": sq}
+
+
 class HelixLoss(LossTerm):
     max_distance: float = 6.0
     target_value: float = -2.0
@@ -426,9 +444,15 @@ class IPTMLoss(LossTerm):
     ):
         # binder - target iptm -- we override asym-id in the case of multi-chain targets
         N = output.full_sequence.shape[0]
-        asym_id = jnp.concatenate(
-            (jnp.zeros(sequence.shape[0]), jnp.ones(N - sequence.shape[0]))
-        ).astype(jnp.int32)
+        b = sequence.shape[0]
+        if b == 0:
+            # predict() uses PSSM=None -> zeros((0,20)); use Boltz/AF2 asym_ids so
+            # cross-chain pairs exist (otherwise pair_mask is empty and iptm=0).
+            asym_id = output.asym_id.astype(jnp.int32)
+        else:
+            asym_id = jnp.concatenate(
+                (jnp.zeros(b), jnp.ones(N - b))
+            ).astype(jnp.int32)
         pair_mask = asym_id[:, None] != asym_id[None, :]
         iptm = predicted_tm_score(
             logits=output.pae_logits,
@@ -489,18 +513,27 @@ class BinderTargetIPSAE(LossTerm):
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
-        # override asym-id in the case of multi-chain targets
-        asym_id = jnp.concatenate(
-            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
-        ).astype(jnp.int32)
-        bt_ipsae = self.reduce(
-            interaction_prediction_score(
+        if binder_len == 0:
+            asym_id = output.asym_id.astype(jnp.int32)
+            scores = interaction_prediction_score(
                 asym_id=asym_id,
                 logits=output.pae_logits,
                 bin_centers=output.pae_bins,
                 pae_cutoff=10.0,
-            )[:binder_len]
-        )
+            )
+            binder_mask = asym_id == asym_id[0]
+            bt_ipsae = self.reduce(jnp.where(binder_mask, scores, -jnp.inf))
+        else:
+            asym_id = jnp.concatenate(
+                (jnp.zeros(binder_len), jnp.ones(N - binder_len))
+            ).astype(jnp.int32)
+            scores = interaction_prediction_score(
+                asym_id=asym_id,
+                logits=output.pae_logits,
+                bin_centers=output.pae_bins,
+                pae_cutoff=10.0,
+            )
+            bt_ipsae = self.reduce(scores[:binder_len])
         return -bt_ipsae, {"bt_ipsae": bt_ipsae}
 
 
@@ -515,18 +548,27 @@ class TargetBinderIPSAE(LossTerm):
     ):
         N = output.full_sequence.shape[0]
         binder_len = sequence.shape[0]
-        # override asym-id in the case of multi-chain targets
-        asym_id = jnp.concatenate(
-            (jnp.zeros(binder_len), jnp.ones(N - binder_len))
-        ).astype(jnp.int32)
-        tb_ipsae = self.reduce(
-            interaction_prediction_score(
+        if binder_len == 0:
+            asym_id = output.asym_id.astype(jnp.int32)
+            scores = interaction_prediction_score(
                 asym_id=asym_id,
                 logits=output.pae_logits,
                 bin_centers=output.pae_bins,
                 pae_cutoff=10.0,
-            )[binder_len:]
-        )
+            )
+            target_mask = asym_id != asym_id[0]
+            tb_ipsae = self.reduce(jnp.where(target_mask, scores, -jnp.inf))
+        else:
+            asym_id = jnp.concatenate(
+                (jnp.zeros(binder_len), jnp.ones(N - binder_len))
+            ).astype(jnp.int32)
+            scores = interaction_prediction_score(
+                asym_id=asym_id,
+                logits=output.pae_logits,
+                bin_centers=output.pae_bins,
+                pae_cutoff=10.0,
+            )
+            tb_ipsae = self.reduce(scores[binder_len:])
         return -tb_ipsae, {"tb_ipsae": tb_ipsae}
 
 

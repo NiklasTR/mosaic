@@ -2,6 +2,8 @@
 # 1. BoltzProteinMPNNLoss: Average log-likelihood of soft binder sequence given Boltz-predicted complex structure
 # 2. FixedChainInverseFoldingLL: Average log-likelihood of fixed monomer sequence given fixed monomer structure
 
+import logging
+
 import gemmi
 import jax
 import numpy as np
@@ -11,6 +13,8 @@ from jaxtyping import Array, Float, Int
 from ..common import TOKENS, LossTerm
 from ..proteinmpnn.mpnn import MPNN_ALPHABET, ProteinMPNN
 from .structure_prediction import AbstractStructureOutput
+
+_LOG = logging.getLogger(__name__)
 
 
 def boltz_to_mpnn_matrix():
@@ -33,7 +37,9 @@ def load_chain(chain: gemmi.Chain) -> tuple[str, Float[Array, "N 4 3"]]:
             coords[idx, atom_idx, 1] = pos.y
             coords[idx, atom_idx, 2] = pos.z
         except Exception:
-            print(f"Failed to get {atom_name} for residue {chain[idx].name}")
+            _LOG.warning(
+                "Failed to get %s for residue %s", atom_name, chain[idx].name
+            )
             coords[idx, atom_idx] = np.nan
 
     for idx in range(len(chain)):
@@ -239,6 +245,8 @@ def jacobi_inverse_fold(
     key,
     jacobi_iterations: int = 10,
     bias: Float[Array, "N 20"] | None = None,
+    design_mask: Float[Array, "N"] | None = None,
+    scaffold_aa_idx: Int[Array, "N"] | None = None,
 ):
     coords = output.backbone_coordinates
 
@@ -292,12 +300,19 @@ def jacobi_inverse_fold(
 
         return logits[:binder_length] @ boltz_to_mpnn_matrix().T
 
-    sequence = jax.random.randint(key = key, minval=0, maxval=20, shape=binder_length)
+    sequence = jax.random.randint(key=key, minval=0, maxval=20, shape=binder_length)
+    if design_mask is not None and scaffold_aa_idx is not None:
+        dm = design_mask.astype(jnp.bool_)
+        sequence = jnp.where(dm, sequence, scaffold_aa_idx)
     for _ in range(jacobi_iterations):
-        logits = seq_to_logits(sequence) 
+        logits = seq_to_logits(sequence)
         if bias is not None:
-            logits += bias
-        sequence = (logits + temp * gumbel).argmax(-1)
+            logits = logits + bias
+        new_seq = (logits + temp * gumbel).argmax(-1)
+        if design_mask is not None and scaffold_aa_idx is not None:
+            sequence = jnp.where(design_mask.astype(jnp.bool_), new_seq, scaffold_aa_idx)
+        else:
+            sequence = new_seq
 
     return sequence
 
@@ -319,7 +334,9 @@ class InverseFoldingSequenceRecovery(LossTerm):
     temp: Float
     num_samples: int = 16
     jacobi_iterations: int = 10
-    bias: Float[Array, "N 20"]  = None
+    bias: Float[Array, "N 20"] | None = None
+    design_mask: Float[Array, "N"] | None = None
+    scaffold_aa_idx: Int[Array, "N"] | None = None
 
     def __call__(
         self,
@@ -336,12 +353,19 @@ class InverseFoldingSequenceRecovery(LossTerm):
                     temp=self.temp,
                     key=k,
                     jacobi_iterations=self.jacobi_iterations,
-                    bias = self.bias,
+                    bias=self.bias,
+                    design_mask=self.design_mask,
+                    scaffold_aa_idx=self.scaffold_aa_idx,
                 ),
                 20,
             )
         )(jax.random.split(key, self.num_samples))
         average_sequence = sequences.mean(0)
         average_sequence = jax.lax.stop_gradient(average_sequence)
-        ip = (average_sequence * sequence).sum(-1).mean()
+        if self.design_mask is not None:
+            dm = self.design_mask.astype(jnp.float32)
+            denom = jnp.maximum(dm.sum(), 1.0)
+            ip = ((average_sequence * sequence).sum(-1) * dm).sum() / denom
+        else:
+            ip = (average_sequence * sequence).sum(-1).mean()
         return -ip, {"sequence_recovery": ip}

@@ -1,4 +1,5 @@
 import copy
+import logging
 
 # set "PROTENIX_DATA_ROOT_DIR" env variable
 import os
@@ -22,7 +23,10 @@ from protenix.protenij import Protenix as Protenij
 from mosaic.common import TOKENS, LinearCombination, LossTerm
 from mosaic.losses.structure_prediction import AbstractStructureOutput
 
-os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
+if "PROTENIX_DATA_ROOT_DIR" not in os.environ:
+    os.environ["PROTENIX_DATA_ROOT_DIR"] = str(Path("~/.protenix").expanduser())
+
+_LOG = logging.getLogger(__name__)
 
 
 def biotite_atom_to_gemmi_atom(atom):
@@ -77,7 +81,7 @@ def set_binder_sequence(new_sequence: Float[Array, "N 20"], features: PyTree):
     binder_len = new_sequence.shape[0]
     protenix_sequence = new_sequence @ boltz_to_protenix_matrix()
     n_msa = features["msa"].shape[0]
-    print("n_msa", n_msa)
+    _LOG.debug("n_msa %s", n_msa)
 
     zero_msa_idx = 20  # GAP #31#20
     n_fake_seq = 1
@@ -108,7 +112,7 @@ def get_trunk_state(
     key: jax.Array,
 ) -> tuple[InitialEmbedding, TrunkEmbedding]:
     """ Compute trunk embedding."""
-    print("JIT compiling protenix trunk module...")
+    _LOG.info("JIT compiling protenix trunk module...")
 
     # manual recycling
     state = initial_recycling_state
@@ -184,7 +188,7 @@ class ProtenixFromTrunkOutput(AbstractStructureOutput):
 
     @cached_property
     def structure_coordinates(self):
-        print("JIT compiling structure module...")
+        _LOG.info("JIT compiling structure module...")
         return self.model.sample_structures(
             initial_embedding=self.initial_embedding,
             trunk_embedding=self.trunk_state,
@@ -196,7 +200,7 @@ class ProtenixFromTrunkOutput(AbstractStructureOutput):
 
     @cached_property
     def confidence_metrics(self) -> ConfidenceMetrics:
-        print("JIT compiling confidence module...")
+        _LOG.info("JIT compiling confidence module...")
         return self.model.confidence_metrics(
             initial_embedding=self.initial_embedding,
             trunk_embedding=self.trunk_state,

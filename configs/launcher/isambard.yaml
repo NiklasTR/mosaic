@@ -1,0 +1,29 @@
+# @package _global_
+# SLURM: Isambard spot, single GPU (binder design). launcher=isambard
+#
+# Run from pathfinder repo root:
+#   python -m mosaic.cli.binder_design --multirun seed=0,1,2 launcher=isambard
+
+defaults:
+  - override /hydra/launcher: submitit_slurm
+
+hydra:
+  launcher:
+    partition: spot
+    qos: spot
+    gres: gpu:h100nvl:1
+    timeout_min: 720
+    nodes: 1
+    tasks_per_node: 1
+    cpus_per_task: 8
+    mem_gb: 64
+    setup:
+      - unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+      - unset VIRTUAL_ENV
+      - UV_PROJECT_ENVIRONMENT=packages/mosaic/.venv uv sync --project packages/mosaic --frozen --extra hydra --group jax-cuda
+      - uv pip install --python packages/mosaic/.venv/bin/python torch torchvision --index-url https://download.pytorch.org/whl/cu130 --upgrade-package torch --upgrade-package torchvision
+      - source packages/mosaic/.venv/bin/activate
+      - export NCCL_DEBUG=INFO
+      - export NCCL_DEBUG_SUBSYS=ALL
+      - export NCCL_IB_DISABLE=1
+      - export NCCL_P2P_DISABLE=1

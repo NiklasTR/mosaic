@@ -4,6 +4,8 @@
 # Could *definitely* be improved.
 # If you want to run this yourself you'll need to download the dataset and install a few additional dependencies.
 
+import logging
+
 import equinox as eqx
 import jax
 import numpy as onp
@@ -16,6 +18,9 @@ from esmj import from_torch, ESMC
 
 # load torch model, convert to JAX
 from esm.models.esmc import ESMC as TORCH_ESMC
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+_LOG = logging.getLogger(__name__)
 
 esm = from_torch(TORCH_ESMC.from_pretrained("esmc_300m").to("cpu"))
 
@@ -108,8 +113,11 @@ state = TrainState(
 for _ in tqdm.tqdm(range(1250)):
     batch = sample_batch(grouped_dataset, 256)
     state, loss = opt_step(state, batch, optim)
-    print(
-        f"{loss: 0.2f}, {onp.var(batch.deltaG): 0.2f} {loss / onp.var(batch.deltaG): 0.2f}"
+    _LOG.info(
+        "%s, %s %s",
+        f"{loss: 0.2f}",
+        f"{onp.var(batch.deltaG): 0.2f}",
+        f"{loss / onp.var(batch.deltaG): 0.2f}",
     )
 
 optim = optax.adam(1e-4)
@@ -121,8 +129,11 @@ state = TrainState(
 for _ in tqdm.tqdm(range(750)):
     batch = sample_batch(grouped_dataset, 256)
     state, loss = opt_step(state, batch, optim)
-    print(
-        f"{loss: 0.2f}, {onp.var(batch.deltaG): 0.2f} {loss / onp.var(batch.deltaG): 0.2f}"
+    _LOG.info(
+        "%s, %s %s",
+        f"{loss: 0.2f}",
+        f"{onp.var(batch.deltaG): 0.2f}",
+        f"{loss / onp.var(batch.deltaG): 0.2f}",
     )
 
 

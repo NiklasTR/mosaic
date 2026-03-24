@@ -1,0 +1,137 @@
+# Short cyclic peptide binder design: optimize a soft binder with Boltz-2 (joltz) + multisample loss.
+# Loss weights are aligned with the Adaptyv Nipah memo (Boltz2 + contacts, PAE, IPTM, MPNN IF, …);
+# MPNN weight is lower than the memo (10) for small cyclic peptides.
+#
+# From repo root with mosaic env:
+#   python -m mosaic.cli.binder_design launcher=local
+#
+# Multirun:
+#   python -m mosaic.cli.binder_design --multirun seed=0,1,2 launcher=aithyra-1gpu
+
+defaults:
+  - _self_
+  - /hydra: default
+  - launcher: local
+
+task_name: binder_design
+
+target_sequence: >- # ZAP70
+  MPMDTSVYESPYSDPEELKDKKLFLKRDNLLIADIELGCGNFGSVRQGVYRMRKKQIDVAIKVLKQGTEKADTEEMMREAQIMHQLDNPYIVRLIGVCQAEALMLVMEMAGGGPLHKFLVGKREEIPVSNVAELLHQVSMGMKYLEEKNFVHRDLAARNVLLVNRHYAKISDFGLSKALGADDSYYTARSAGKWPLKWYAPECINFRKFSSRSDVWSYGVTMWEALSYGQKPYKKMKGPEVMAFIEQGKRMECPPECPPELYALMSDCWIYKWEDRPDFLTVEQRMRACYYSLASKVEG
+
+binder_length: 16
+# Terminal cysteines fixed in the Boltz graph (SG atoms); 14 designable positions.
+binder_sequence: CXXXXXXXXXXXXXXC
+
+seed: 0
+
+# null or <=0: one design per job. >0: repeat design+rank until wall time exceeded (Slurm walltime should exceed this).
+runtime:
+  max_seconds: 345600 # 4 days
+
+# Boltz-2 used for design-time optimization (replaces AF2).
+boltz2:
+  checkpoint: null
+  cyclic_binder: true
+  target_use_msa: true
+  # Persist Boltz preprocess under {msa_cache_dir}/{sha256(target_sequence)}/ so multirun jobs
+  # reuse ColabFold MSA (same YAML stem = Boltz record id). null = ephemeral temp dir only.
+  msa_cache_dir: null
+  # Optional path to precomputed target MSA (.a3m or .csv per Boltz); skips ColabFold for target.
+  target_msa_path: null
+  design:
+    recycling_steps: 1
+    sampling_steps: 25
+    num_samples: 4
+    mpnn_backbone_noise: 0.05
+
+loss:
+  binder_target_contact: 1.0
+  within_binder_contact: 1.0
+  # Memo used 10.0; lower for small cyclic peptides (homopolymer / IF mismatch risk).
+  inverse_folding_mpnn: 2.0
+  mpnn_temp: 0.001
+  target_binder_pae: 0.05
+  binder_target_pae: 0.05
+  iptm: 0.025
+  within_binder_pae: 0.4
+  ptm_energy: 0.025
+  plddt: 0.1
+  # Disulfide design: 0 = suppress C (NoCys); 1–3 = target that many S–S pairs (soft expected C = 2×pairs).
+  disulfide_pairs: 2
+  cysteine_count_weight: 1.0
+
+geometry:
+  ca_ca_loss_weight: 0.0
+  frame_orient_loss_weight: 0.0
+  cys_sidechain_loss_weight: 0.0
+  ca_ca_pairs: []
+  frame_pairs: []
+  cysteine:
+    indices: []
+    chi1_target_deg: null
+    sg_sg_pairs: []
+
+# Three-phase simplex_APGM (blog Modal pipeline): soft then log-space sharpen x2.
+optimizer:
+  max_gradient_norm: 1.0
+  phase1_n_steps: 100
+  phase1_stepsize_factor: 0.2
+  phase1_momentum: 0.3
+  phase1_scale: 1.0
+  phase2_n_steps: 50
+  phase2_stepsize_factor: 0.5
+  phase2_momentum: 0.0
+  phase2_scale: 1.25
+  phase3_n_steps: 15
+  phase3_stepsize_factor: 0.5
+  phase3_momentum: 0.0
+  phase3_scale: 1.4
+
+# Post-design ranking loss (blog): IPTM + IPSAE on full-atom features, higher multisample.
+ranking:
+  enabled: true
+  recycling_steps: 3
+  num_samples: 6
+  iptm: 1.0
+  target_binder_ipsae: 0.5
+  binder_target_ipsae: 0.5
+
+boltz2_fold:
+  enabled: true
+  checkpoint: null
+  recycling_steps: 1
+  sampling_steps: 25
+  cyclic_binder: true
+
+# Post-fold structure scores (non-differentiable). Requires boltz2_fold.enabled.
+#
+# HBPLUS: vendor tree under ``packages/hbplus`` (from repo-root ``hbplus.zip``); run ``make hbplus``
+# there. ``home: hbplus`` resolves to that directory. Override ``executable`` with an absolute path
+# on clusters where the checkout layout differs. ``hbplus_hbonds`` / ``hbplus_score`` are **inter-chain**
+# only (donor and acceptor on different chains); ``hbplus_hbonds_intra_chain`` / ``hbplus_hbonds_total``
+# give the rest and the program-wide total from HBPLUS.
+#
+# EvoEF (v1) / EvoEF2: run ``bash build.sh`` under packages/EvoEF and packages/EvoEF2.
+# ``home`` is relative to pathfinder ``packages/`` (resolved from the mosaic install
+# layout so it still works after Hydra chdirs to the run output). Override with an
+# absolute path if your checkout differs. For >2 protein chains, set split / split_chains.
+scoring:
+  hbplus:
+    enabled: true
+    home: hbplus
+    executable: hbplus
+    extra_args: []
+  evoef:
+    enabled: true
+    home: EvoEF
+    executable: null
+    split: null
+    extra_args: []
+  evoef2:
+    enabled: true
+    home: EvoEF2
+    executable: null
+    split_chains: null
+    extra_args: []
+  cysteine_disulfide:
+    enabled: true

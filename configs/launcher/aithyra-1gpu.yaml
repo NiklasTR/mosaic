@@ -1,0 +1,33 @@
+# @package _global_
+# SLURM: Aithyra, 1x RTX6000. launcher=aithyra-1gpu
+#
+# Run from pathfinder repo root (cwd must be the repo: same convention as thermax’s launcher).
+# GPU JAX: root optional `cuda13` pulls `jax[cuda13]` via thermax / many_cycles extras.
+#   uv sync --extra cuda13
+#   python -m mosaic.cli.binder_design --multirun seed=0,1,2 launcher=aithyra-1gpu
+#
+# Do not put `${...}` in `setup:` — OmegaConf parses the config and treats `${` as Hydra
+# interpolation, not the shell. Use plain paths relative to repo root (no cd).
+
+defaults:
+  - override /hydra/launcher: submitit_slurm
+
+hydra:
+  launcher:
+    partition: gpu
+    qos: normal
+    gres: gpu:rtx6000:1
+    timeout_min: 1000
+    nodes: 1
+    tasks_per_node: 1
+    cpus_per_task: 8
+    mem_gb: 64
+    setup:
+      - unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+      - unset VIRTUAL_ENV
+      - uv sync --frozen --extra cuda13
+      - source .venv/bin/activate
+      - export NCCL_DEBUG=INFO
+      - export NCCL_DEBUG_SUBSYS=ALL
+      - export NCCL_IB_DISABLE=1
+      - export NCCL_P2P_DISABLE=1

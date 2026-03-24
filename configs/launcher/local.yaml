@@ -1,0 +1,6 @@
+# @package _global_
+# Local run — no Submitit (same role as packages/thermax/configs/launcher/local.yaml).
+#
+# Prefer running from pathfinder repo root so logs resolve consistently:
+#   python -m mosaic.cli.binder_design launcher=local
+# Or from packages/mosaic with the same config name.

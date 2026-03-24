@@ -30,6 +30,42 @@ class NoCys(LossTerm):
         return full_seq
 
 
+class ScaffoldBinderSequence(LossTerm):
+    """Blend optimized sequence with fixed scaffold one-hot (stop-gradient on scaffold rows)."""
+
+    inner: LossTerm
+    scaffold_one_hot: Float[Array, "N 20"] = eqx.field(converter=jnp.asarray)
+    design_mask: Bool[Array, "N"] = eqx.field(converter=jnp.asarray)
+    use_nocys: bool = False
+
+    def __call__(self, x: Float[Array, "N Q"], *, key):
+        if self.use_nocys:
+            assert x.shape[-1] == 19
+            s20 = NoCys.sequence(x)
+        else:
+            assert x.shape[-1] == 20
+            s20 = x
+        m = self.design_mask.astype(jnp.float32)[:, None]
+        fixed = jax.lax.stop_gradient(self.scaffold_one_hot)
+        merged = m * s20 + (1.0 - m) * fixed
+        return self.inner(merged, key=key)
+
+
+class NoCysScaffoldBinder(LossTerm):
+    """NoCys 19-dim input, expand to 20, then freeze scaffold rows before Boltz inner loss."""
+
+    inner: LossTerm
+    scaffold_one_hot: Float[Array, "N 20"] = eqx.field(converter=jnp.asarray)
+    design_mask: Bool[Array, "N"] = eqx.field(converter=jnp.asarray)
+
+    def __call__(self, x: Float[Array, "N 19"], *, key):
+        s20 = NoCys.sequence(x)
+        m = self.design_mask.astype(jnp.float32)[:, None]
+        fixed = jax.lax.stop_gradient(self.scaffold_one_hot)
+        merged = m * s20 + (1.0 - m) * fixed
+        return self.inner(merged, key=key)
+
+
 class SoftClip(LossTerm):
     """
         Soft clips a loss function using an ELU transformation.

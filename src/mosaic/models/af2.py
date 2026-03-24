@@ -10,6 +10,8 @@ from mosaic.alphafold.model import config, data, modules_multimer, modules, stat
 from mosaic.losses.confidence_metrics import confidence_metrics, _calculate_bin_centers
 
 
+import logging
+
 from jaxtyping import Array, Float, PyTree, Bool
 import equinox as eqx
 import jax
@@ -29,6 +31,8 @@ import haiku as hk
 
 from mosaic.structure_prediction import AbstractStructureOutput
 from ..common import LossTerm, LinearCombination
+
+_LOG = logging.getLogger(__name__)
 
 
 def from_string(s: str) -> gemmi.Structure:
@@ -63,28 +67,55 @@ class AFOutput(eqx.Module):
     recycling_state: state.AlphaFoldState
 
 
+_AF2_PARAMS_URL = "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar"
+_AF2_PARAMS_TAR = "alphafold_params_2022-12-06.tar"
+
+
+def _af2_model_names(multimer: bool) -> list[str]:
+    suffix = "multimer_v3" if multimer else "ptm"
+    n_models = 5 if multimer else 2
+    return [f"model_{i}_{suffix}" for i in range(1, n_models + 1)]
+
+
+def _af2_params_ready(data_dir: Path, multimer: bool) -> bool:
+    params_dir = data_dir / "params"
+    return all(
+        (params_dir / f"params_{name}.npz").is_file()
+        for name in _af2_model_names(multimer)
+    )
+
+
+def _download_af2_params(data_dir: Path) -> None:
+    import httpx
+    import tarfile
+
+    params_dir = data_dir / "params"
+    params_dir.mkdir(parents=True, exist_ok=True)
+    tar_path = params_dir / _AF2_PARAMS_TAR
+    _LOG.info("Downloading AF2 parameters to %s ...", params_dir)
+    with httpx.stream("GET", _AF2_PARAMS_URL, follow_redirects=True, timeout=600) as r:
+        r.raise_for_status()
+        with open(tar_path, "wb") as f:
+            for chunk in r.iter_bytes():
+                f.write(chunk)
+    with tarfile.open(tar_path) as tar:
+        tar.extractall(path=params_dir)
+    tar_path.unlink(missing_ok=True)
+    _LOG.info("AF2 parameters extracted under %s", params_dir)
+
+
 def load_af2(data_dir: str = "~/.alphafold", multimer=True):
     data_dir = Path(data_dir).expanduser()
 
-    if not (data_dir / "params").exists():
-        print(f"Downloading AF2 parameters to {data_dir}/params...")
-        import httpx
-        import tarfile
-
-        params_dir = data_dir / "params"
-        params_dir.mkdir(parents=True, exist_ok=True)
-        url = "https://storage.googleapis.com/alphafold/alphafold_params_2022-12-06.tar"
-        tar_path = params_dir / "alphafold_params_2022-12-06.tar"
-
-        with httpx.stream("GET", url, follow_redirects=True) as r:
-            r.raise_for_status()
-            with open(tar_path, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
-
-        with tarfile.open(tar_path) as tar:
-            tar.extractall(path=params_dir)
-        tar_path.unlink()
+    if not _af2_params_ready(data_dir, multimer):
+        _download_af2_params(data_dir)
+    if not _af2_params_ready(data_dir, multimer):
+        raise FileNotFoundError(
+            f"AF2 parameters missing under {data_dir / 'params'} (expected "
+            f"{', '.join(f'params_{n}.npz' for n in _af2_model_names(multimer))}). "
+            "Point af2.data_dir at a directory where the archive is extracted, "
+            "or run once on a machine with access to storage.googleapis.com."
+        )
 
     try:
         model_params = [
@@ -121,7 +152,7 @@ def load_af2(data_dir: str = "~/.alphafold", multimer=True):
         use_dropout=False,
         **kwargs,
     ) -> AFOutput:
-        print("JIT compiling AF2...")
+        _LOG.info("JIT compiling AF2...")
         model = init_model(cfg.model)
         prediction_results, state = model(
             batch=features,
@@ -152,6 +183,9 @@ def load_af2(data_dir: str = "~/.alphafold", multimer=True):
         )
 
     transformed = hk.transform(_forward_fn)
+    _LOG.info(
+        "AF2 Haiku forward is ready; the first forward pass will run JAX compilation."
+    )
     return (transformed.apply, stacked_model_params)
 
 
@@ -329,7 +363,33 @@ def af2_atom_positions(chain: gemmi.Chain) -> tuple[np.ndarray, np.ndarray]:
     return all_positions[None], all_positions_mask[None]
 
 
-def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
+def cyclic_pairwise_offset(length: int, offset_type: int) -> np.ndarray:
+    """Halo Cycle0-style cyclic pairwise offsets for a single chain of length ``length``."""
+    i = np.arange(length, dtype=np.float64)
+    ij = np.stack([i, i + length], axis=-1)
+    offset_linear = i[:, None] - i[None, :]
+    c_offset = np.abs(ij[:, None, :, None] - ij[None, :, None, :]).min(axis=(2, 3))
+    if offset_type == 1:
+        pass
+    elif offset_type >= 2:
+        flip = c_offset < np.abs(offset_linear)
+        c_offset = np.where(flip, -c_offset, c_offset)
+    if offset_type == 3:
+        far = np.abs(c_offset) > 2
+        c_offset = np.where(
+            far,
+            (32 * c_offset) / np.maximum(np.abs(c_offset), 1e-12),
+            c_offset,
+        )
+    return (c_offset * np.sign(offset_linear)).astype(np.float32)
+
+
+def make_af_features(
+    chains: list[TargetChain],
+    *,
+    cyclic_binder: bool = False,
+    cyclic_offset_type: int = 2,
+) -> dict[str, jax.Array]:
     assert all(not c.use_msa for c in chains), "AF2 interface does not support MSAs"
 
     # check for missing residues in template chains
@@ -342,8 +402,13 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
     # TODO: handle homo-multimers better?
     L = sum(len(c.sequence) for c in chains)
     index_within_chain = np.concatenate(
-        [np.arange(len(c.sequence), dtype=int) for c in chains]
+        [np.arange(len(c.sequence), dtype=np.int32) for c in chains]
     )
+    idx_f = index_within_chain.astype(np.float32)
+    relative_position_offset = idx_f[:, None] - idx_f[None, :]
+    if cyclic_binder:
+        b = len(chains[0].sequence)
+        relative_position_offset[:b, :b] = cyclic_pairwise_offset(b, cyclic_offset_type)
     chain_index = np.concatenate(
         [
             np.full(shape=len(c.sequence), fill_value=idx + 1)
@@ -367,6 +432,7 @@ def make_af_features(chains: list[TargetChain]) -> dict[str, jax.Array]:
         "asym_id": chain_index,
         "sym_id": chain_index,
         "entity_id": chain_index,
+        "relative_position_offset": relative_position_offset,
     }
 
     template_features = [
@@ -409,16 +475,38 @@ class AlphaFold2(StructurePredictionModel):
         self.stacked_parameters = stacked_params
         self.multimer = multimer
 
-    def target_only_features(self, chains: list[TargetChain]):
+    def target_only_features(
+        self,
+        chains: list[TargetChain],
+        *,
+        cyclic_binder: bool = False,
+        cyclic_offset_type: int = 2,
+    ):
         for c in chains:
             assert c.polymer_type == "PROTEIN", "AF2 only supports protein chains"
             assert not c.use_msa, "AF2 interface does not support MSA yet"
 
-        return make_af_features(chains=chains), None
+        return (
+            make_af_features(
+                chains,
+                cyclic_binder=cyclic_binder,
+                cyclic_offset_type=cyclic_offset_type,
+            ),
+            None,
+        )
 
-    def binder_features(self, binder_length, chains: list[TargetChain]):
+    def binder_features(
+        self,
+        binder_length,
+        chains: list[TargetChain],
+        *,
+        cyclic_binder: bool = False,
+        cyclic_offset_type: int = 2,
+    ):
         features, _ = self.target_only_features(
-            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains
+            [TargetChain(sequence="G" * binder_length, use_msa=False)] + chains,
+            cyclic_binder=cyclic_binder,
+            cyclic_offset_type=cyclic_offset_type,
         )
         return features, None
 

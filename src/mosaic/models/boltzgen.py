@@ -2,6 +2,7 @@
 #
 # Note: this is pretty rushed, will come back and clean up later
 # data loading and structure writing is **terrible**
+import logging
 import pickle
 import subprocess
 from dataclasses import dataclass
@@ -37,12 +38,13 @@ from jaxtyping import Array, Float, PyTree
 from mosaic.losses.structure_prediction import AbstractStructureOutput
 from ..util import pairwise_distance
 
+_LOG = logging.getLogger(__name__)
 
 
 def load_boltzgen(checkpoint_dir=Path("~/.boltz/").expanduser(), model_diverse=True):
     checkpoints = ["boltzgen1_adherence.ckpt", "boltzgen1_diverse.ckpt"]
     if not all((checkpoint_dir / ckpt).exists() for ckpt in checkpoints):
-        print(f"Downloading Boltz folding checkpoints to {checkpoint_dir}")
+        _LOG.info("Downloading Boltz folding checkpoints to %s", checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         for ckpt in checkpoints:
             subprocess.run(
@@ -138,7 +140,7 @@ def _generate_mmcif(
                         sample[k] = prediction[k][0]
                         native[k] = batch[k][0]
                 except Exception as e:
-                    print(e)
+                    _LOG.warning("%s", e)
 
         if self.atom14:
             sample = res_from_atom14(sample)
@@ -240,7 +242,7 @@ def _generate_mmcif(
 
             traceback.print_exc()  # noqa: T201
             msg = f"predict/writer.py: Validation structure writing failed on {batch['id'][0]} with error {e}. Skipping."
-            print(msg)
+            _LOG.error("%s", msg)
 
 
 @dataclass
