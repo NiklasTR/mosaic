@@ -60,7 +60,10 @@ def main(cfg: DictConfig) -> None:
     import jax.numpy as jnp
     import numpy as np
 
-    from mosaic.binder_scaffold import resolve_binder_sequence
+    from mosaic.binder_scaffold import (
+        resolve_binder_sequence,
+        scaffold_amino_acid_indices,
+    )
     from mosaic.cli import binder_geometry as bg
     from mosaic.common import TOKENS
     from mosaic.losses import structure_prediction as sp
@@ -213,9 +216,7 @@ def main(cfg: DictConfig) -> None:
         bf_kw["binder_length"] = binder_length
     features, _ = model.binder_features(**bf_kw)
     scaffold_20 = jnp.array(features["res_type"][0, :binder_length, 2:22], dtype=jnp.float32)
-    scaffold_aa_idx = jnp.array(
-        [TOKENS.index(seq_str[i]) for i in range(binder_length)], dtype=jnp.int32
-    )
+    scaffold_aa_idx = jnp.asarray(scaffold_amino_acid_indices(seq_str))
     dm_float = design_mask_jnp.astype(jnp.float32)
 
     lw = cfg.loss

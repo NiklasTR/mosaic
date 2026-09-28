@@ -2,7 +2,12 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from mosaic.binder_scaffold import parse_binder_sequence_string, resolve_binder_sequence
+from mosaic.binder_scaffold import (
+    parse_binder_sequence_string,
+    resolve_binder_sequence,
+    scaffold_amino_acid_indices,
+)
+from mosaic.common import TOKENS
 from mosaic.losses.boltz2 import set_binder_sequence
 from mosaic.losses.geometry import (
     PairwiseCADistanceLoss,
@@ -15,6 +20,24 @@ def test_resolve_binder_all_x() -> None:
     s, m = resolve_binder_sequence(4, None)
     assert s == "XXXX"
     assert m.all()
+
+
+@pytest.mark.parametrize(
+    ("binder_sequence", "expected"),
+    [
+        (None, [0, 0, 0, 0]),
+        ("CXXC", [TOKENS.index("C"), 0, 0, TOKENS.index("C")]),
+        (
+            "ACXWG",
+            [TOKENS.index("A"), TOKENS.index("C"), 0, TOKENS.index("W"), TOKENS.index("G")],
+        ),
+    ],
+)
+def test_scaffold_aa_idx_ignores_designable_x(binder_sequence, expected) -> None:
+    sequence, _ = resolve_binder_sequence(len(expected), binder_sequence)
+    indices = scaffold_amino_acid_indices(sequence)
+    assert indices.tolist() == expected
+    assert str(indices.dtype) == "int32"
 
 
 def test_parse_scaffold_cxxc() -> None:

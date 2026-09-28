@@ -47,3 +47,15 @@ def resolve_binder_sequence(
     if L < 1:
         raise ValueError("binder_length must be >= 1")
     return "X" * L, np.ones(L, dtype=np.bool_)
+
+
+def scaffold_amino_acid_indices(sequence: str) -> np.ndarray:
+    """Encode a resolved scaffold; designable X sites use an ignored placeholder.
+
+    ProteinMPNN uses these indices only at fixed positions selected by the
+    scaffold's design mask. X is not part of the amino-acid vocabulary.
+    """
+    return np.array(
+        [0 if residue == "X" else TOKENS.index(residue) for residue in sequence],
+        dtype=np.int32,
+    )
