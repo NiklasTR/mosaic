@@ -202,11 +202,12 @@ def main(cfg: DictConfig) -> None:
     )
 
     b2_ck = cfg.boltz2.checkpoint
+    tf32_sampling = bool(cfg.boltz2.get("tf32_sampling", True))
     _LOG.info("Loading Boltz-2 for design (may JIT / download checkpoint on first use).")
     model = (
-        Boltz2(Path(str(b2_ck)).expanduser().resolve())
+        Boltz2(Path(str(b2_ck)).expanduser().resolve(), tf32_sampling=tf32_sampling)
         if b2_ck
-        else Boltz2()
+        else Boltz2(tf32_sampling=tf32_sampling)
     )
     _LOG.info("Building binder+target features (Boltz-2 YAML).")
     bf_kw: dict = {
@@ -328,9 +329,9 @@ def main(cfg: DictConfig) -> None:
         b2_for_fold = model
     else:
         b2_for_fold = (
-            Boltz2(Path(str(fold_ck)).expanduser().resolve())
+            Boltz2(Path(str(fold_ck)).expanduser().resolve(), tf32_sampling=tf32_sampling)
             if fold_ck
-            else Boltz2()
+            else Boltz2(tf32_sampling=tf32_sampling)
         )
     cyclic_fold = bool(cfg.boltz2_fold.cyclic_binder)
     do_fold = bool(cfg.boltz2_fold.enabled)

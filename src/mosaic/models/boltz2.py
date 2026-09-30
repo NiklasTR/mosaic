@@ -168,9 +168,11 @@ def binder_features(
 
 class Boltz2(StructurePredictionModel):
     model: eqx.Module
+    tf32_sampling: bool = eqx.field(static=True)
 
-    def __init__(self, cache_path: Path | None = None):
+    def __init__(self, cache_path: Path | None = None, *, tf32_sampling: bool = True):
         self.model = lb(cache_path) if cache_path is not None else lb()
+        self.tf32_sampling = tf32_sampling
 
     @staticmethod
     def target_only_features(
@@ -215,6 +217,7 @@ class Boltz2(StructurePredictionModel):
     ):
         return Boltz2Loss(
             joltz2=self.model,
+            tf32_sampling=self.tf32_sampling,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
@@ -236,6 +239,7 @@ class Boltz2(StructurePredictionModel):
     ):
         return MultiSampleBoltz2Loss(
             joltz2=self.model,
+            tf32_sampling=self.tf32_sampling,
             features=features,
             recycling_steps=recycling_steps,
             sampling_steps=sampling_steps if sampling_steps is not None else 25,
@@ -264,6 +268,7 @@ class Boltz2(StructurePredictionModel):
 
         return Boltz2Output(
             joltz2=self.model,
+            tf32_sampling=self.tf32_sampling,
             features=features,
             recycling_steps=recycling_steps,
             num_sampling_steps=sampling_steps if sampling_steps is not None else 25,

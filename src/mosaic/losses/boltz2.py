@@ -261,6 +261,7 @@ class Boltz2Output(AbstractStructureOutput):
     recycling_steps: int = 0
     num_sampling_steps: int = 25
     initial_recycling_state: TrunkState | None = None
+    tf32_sampling: bool = True
 
     @property
     def full_sequence(self):
@@ -329,7 +330,7 @@ class Boltz2Output(AbstractStructureOutput):
                 self.features,
             )
         )
-        with jax.default_matmul_precision("float32"):
+        with jax.default_matmul_precision("high" if self.tf32_sampling else "float32"):
             return self.joltz2.structure_module.sample(
                 s_trunk=self.trunk_state.s,
                 s_inputs=self.initial_embedding.s_inputs,
@@ -409,6 +410,7 @@ class Boltz2Loss(LossTerm):
     name: str = "boltz2"
     initial_recycling_state: TrunkState | None = None
     binder_design_mask: Bool[Array, "N"] | None = None
+    tf32_sampling: bool = eqx.field(default=True, static=True)
 
     def __call__(self, sequence: Float[Array, "N 20"], key=None):
         """Compute the loss for a given sequence."""
@@ -419,6 +421,7 @@ class Boltz2Loss(LossTerm):
         # initialize lazy output object
         output = Boltz2Output(
             joltz2=self.joltz2,
+            tf32_sampling=self.tf32_sampling,
             features=features,
             deterministic=self.deterministic,
             key=key,
@@ -446,6 +449,7 @@ class Boltz2FromTrunkOutput(eqx.Module):
     recycling_steps: int = 0
     num_sampling_steps: int = 25
     initial_recycling_state: TrunkState | None = None
+    tf32_sampling: bool = eqx.field(default=True, static=True)
 
     @property
     def full_sequence(self):
@@ -478,7 +482,7 @@ class Boltz2FromTrunkOutput(eqx.Module):
                 self.features,
             )
         )
-        with jax.default_matmul_precision("float32"):
+        with jax.default_matmul_precision("high" if self.tf32_sampling else "float32"):
             return self.joltz2.structure_module.sample(
                 s_trunk=self.trunk_state.s,
                 s_inputs=self.initial_embedding.s_inputs,
@@ -558,6 +562,7 @@ class MultiSampleBoltz2Loss(LossTerm):
     initial_recycling_state: TrunkState | None = None
     binder_design_mask: Bool[Array, "N"] | None = None
     reduction: any = jnp.mean
+    tf32_sampling: bool = eqx.field(default=True, static=True)
     """
         Run the structure and confidence modules multiple times from the same trunk output.
         When `reduction` is jnp.mean this is equivalent to the expected loss over multiple samples *assuming a deterministic trunk*, but faster.
@@ -573,6 +578,7 @@ class MultiSampleBoltz2Loss(LossTerm):
         # initialize lazy output object
         output = Boltz2Output(
             joltz2=self.joltz2,
+            tf32_sampling=self.tf32_sampling,
             features=features,
             deterministic=self.deterministic,
             key=key,
@@ -585,6 +591,7 @@ class MultiSampleBoltz2Loss(LossTerm):
         def apply_loss_to_single_sample(key):
             from_trunk_output = Boltz2FromTrunkOutput(
                 joltz2=self.joltz2,
+                tf32_sampling=self.tf32_sampling,
                 features=features,
                 deterministic=self.deterministic,
                 key=key,

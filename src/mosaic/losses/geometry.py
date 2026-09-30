@@ -157,6 +157,111 @@ def project_his_acceptor_nd1_h(
     return nd1_pos + r * ba
 
 
+# Rosetta ref2015 H-bond geometry for His -> Asp/Glu (hbacc_CXL):
+#   database/scoring/score_functions/hbonds/ref2015_params/HBEval.csv
+#     hbdon_IMD and hbdon_IME both select the aASP_dHIS distance fit.
+#   ref2015_params/HBPoly1D.csv, row 20:
+#     hbpoly_ahdist_aASP_dHIS_9gt3_hesmooth_min1p6 has its minimum at
+#     1.84999956 A (derivative roots within the polynomial's domain).
+#   source/src/core/scoring/hbonds/hbonds_geom.cc:
+#     get_hb_acc_chem_type maps both Asp/Glu to hbacc_CXL;
+#     bah_chi_compute_energy_sp2 minimizes at BAH=120 deg, chi=0 or pi.
+# Source: https://github.com/RosettaCommons/rosetta (main, 2026-09-30).
+# This is an H-bond-term optimum for a His donor, not a full-score minimum
+# or a universal donor-independent distance (e.g. Arg uses ~2.04 A).
+ROSETTA_CARBOXYLATE_HIS_AH_DIS_A = 1.85
+
+
+def project_carboxylate_acceptor_h(
+    o_pos: Float[Array, "3"],
+    c_pos: Float[Array, "3"],
+    other_o_pos: Float[Array, "3"],
+    ah_dis_A: float = ROSETTA_CARBOXYLATE_HIS_AH_DIS_A,
+) -> Float[Array, "3"]:
+    """Shared donor-H target forked by both Asp/Glu carboxylate oxygens.
+
+    Supply (OD1, CG, OD2) or (OD2, CG, OD1) for Asp; supply
+    (OE1, CD, OE2) or (OE2, CD, OE1) for Glu. Inputs are atom xyz
+    coordinates in Angstrom, matching the His projector interface.
+
+    H lies in the O-C-other_O plane on the perpendicular bisector of O-O,
+    on the opposite side of O-O from C, ``ah_dis_A`` from BOTH oxygens.
+    Swapping the oxygen inputs leaves the target unchanged. For equal C-O
+    lengths this also lies on the outward O-C-O angle bisector; using the
+    perpendicular bisector preserves equal O-H distances for unequal C-O
+    lengths. The resulting C-O-H angles are not constrained to 120 degrees.
+
+    This is a bifurcated geometric target, not the isolated single-oxygen
+    Rosetta angular optimum. Only the default O-H distance (1.85 A) is
+    taken from the ref2015 His-to-carboxylate distance fit. The target is
+    a donor proton, not a covalently attached O-H; both oxygens are
+    treated as deprotonated carboxylate acceptors.
+
+    Requires distinct, non-collinear heavy atoms and ``ah_dis_A`` greater
+    than half the O-O separation. No equidistant target exists when the
+    separation exceeds twice that distance (the square root returns NaN).
+    Differentiable w.r.t. all coordinates for valid geometry.
+    """
+    midpoint = 0.5 * (o_pos + other_o_pos)
+    oo = other_o_pos - o_pos
+    axis = oo / jnp.linalg.norm(oo)
+    outward = midpoint - c_pos
+    outward = outward - jnp.dot(outward, axis) * axis
+    outward = outward / jnp.linalg.norm(outward)
+    r = jnp.asarray(ah_dis_A, dtype=o_pos.dtype)
+    height = jnp.sqrt(r * r - 0.25 * jnp.dot(oo, oo))
+    return midpoint + height * outward
+
+
+# Rosetta ref2015 His -> peptide backbone carbonyl (hbacc_PBA):
+#   database/scoring/score_functions/hbonds/ref2015_params/HBEval.csv
+#     maps hbdon_IMD/IME -> hbacc_PBA to the aGLY_dHIS distance fit,
+#     for both seq_sep_PM1 and seq_sep_other (not restricted to Gly).
+#   ref2015_params/HBPoly1D.csv, row 28:
+#     hbpoly_ahdist_aGLY_dHIS_9gt3_hesmooth_min1p6 minimizes at
+#     1.90999774 A (derivative roots within the polynomial's domain).
+#   source/src/core/scoring/hbonds/hbonds_geom.cc:
+#     backbone ABase2 is CA; bah_chi_compute_energy_sp2 has minima
+#     at BAH=120 deg and chi=0 or pi in the CA-C-O plane.
+# Source: https://github.com/RosettaCommons/rosetta (main, 2026-09-30).
+ROSETTA_PEPTIDE_CARBONYL_HIS_AH_DIS_A = 1.91
+
+
+def project_peptide_carbonyl_acceptor_h(
+    o_pos: Float[Array, "3"],
+    c_pos: Float[Array, "3"],
+    ca_pos: Float[Array, "3"],
+    ah_dis_A: float = ROSETTA_PEPTIDE_CARBONYL_HIS_AH_DIS_A,
+) -> Float[Array, "3"]:
+    """Ideal donor-H position for a peptide backbone carbonyl oxygen.
+
+    Supply O, C, and CA xyz coordinates from the same residue, in
+    Angstrom. The CA-C-O plane defines the local peptide plane; neither
+    the same residue's N nor the next residue is needed. This applies to
+    any residue's peptide carbonyl, not a terminal carboxylate or side
+    chain carbonyl.
+
+    Returns H at ``ah_dis_A`` from O, with angle(C, O, H) = 120 degrees,
+    in the CA-C-O plane on the branch pointing away from CA. Rosetta's
+    sp2 term permits both in-plane branches; we select one to return a
+    single position. The 1.91 A default is the ref2015 His-donor distance
+    fit minimum, not a donor-independent or full-score optimum. The
+    returned point is a donor-H target, not a covalent O-H proton.
+
+    Requires distinct, non-collinear heavy atoms and positive distance.
+    Differentiable w.r.t. all input coordinates for valid geometry.
+    """
+    axis = c_pos - o_pos
+    axis = axis / (jnp.linalg.norm(axis) + 1e-8)
+    to_ca = ca_pos - o_pos
+    perp = to_ca - jnp.dot(to_ca, axis) * axis
+    perp = perp / (jnp.linalg.norm(perp) + 1e-8)
+    h_dir = -0.5 * axis - 0.8660254037844386 * perp
+    h_dir = h_dir / (jnp.linalg.norm(h_dir) + 1e-8)
+    r = jnp.asarray(ah_dis_A, dtype=o_pos.dtype)
+    return o_pos + r * h_dir
+
+
 # Amber14 ff14SB optima for an Arg guanidinium N-H (NE/NH1/NH2, type N2):
 #   Bond H-N2: 1.01 A (protein.ff14SB.xml, same H-N entry as His NA).
 #   Angles CA-N2-H = H-N2-H = 120 deg; CZ is CA-type, so e.g.

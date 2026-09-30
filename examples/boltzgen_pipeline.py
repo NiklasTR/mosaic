@@ -501,6 +501,7 @@ def _(BINDER_LEN, Boltz2FromTrunkOutput, Boltz2Output, eqx, fold_in, jax, jnp):
         """
         output = Boltz2Output(
             joltz2=model.model,
+            tf32_sampling=model.tf32_sampling,
             features=features,
             deterministic=True,
             key=fold_in(key, "trunk"),
@@ -510,6 +511,7 @@ def _(BINDER_LEN, Boltz2FromTrunkOutput, Boltz2Output, eqx, fold_in, jax, jnp):
         def apply_loss_to_single_sample(key):
             from_trunk_output = Boltz2FromTrunkOutput(
                 joltz2=model.model,
+                tf32_sampling=model.tf32_sampling,
                 features=features,
                 deterministic=True,
                 key=key,
