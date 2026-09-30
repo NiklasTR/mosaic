@@ -261,11 +261,22 @@ class ExpectedResidueCountLoss(LossTerm):
     shortfall below ``target`` is penalized, extra copies are free.
     E.g. ``residue="H", target_expected_count=2.0, at_least=True`` means
     "at least 2 histidines".
+
+    ``residue`` may also be a group of distinct one-letter codes. For
+    example ``residue="DE", target_expected_count=1.0, at_least=True``
+    requires at least one expected acidic residue, counting Asp and Glu
+    together (not one of each). This is a soft expected-count constraint;
+    check inclusion again after discretizing a sequence.
     """
 
     residue: str = "C"
     target_expected_count: float = 0.0
     at_least: bool = False
+
+    def __post_init__(self):
+        if (not self.residue or any(aa not in TOKENS for aa in self.residue)
+                or len(set(self.residue)) != len(self.residue)):
+            raise ValueError("residue must contain distinct standard one-letter residue codes")
 
     def __call__(
         self,
@@ -273,8 +284,8 @@ class ExpectedResidueCountLoss(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-        idx = TOKENS.index(self.residue)
-        expected = sequence[:, idx].sum()
+        indices = jnp.asarray([TOKENS.index(aa) for aa in self.residue])
+        expected = sequence[:, indices].sum()
         tgt = jnp.asarray(self.target_expected_count, dtype=expected.dtype)
         if self.at_least:
             shortfall = jax.nn.relu(tgt - expected)

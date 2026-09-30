@@ -323,6 +323,82 @@ def _first_atom_indices(feats0) -> Int[Array, "Ntok"]:
     )
 
 
+class HisCarboxylateHydrogenBondLoss(LossTerm):
+    """Harmonic coincidence of His HD1 and a forked Asp/Glu acceptor target.
+
+    Energy is ``0.5 * sum((H_HD1 - H_acceptor)**2)`` in A^2; multiply
+    this term by a spring constant in a loss combination. There is no
+    dead zone or best-pair selection. The acceptor uses the side-chain
+    carboxylate (not a terminal backbone carboxylate).
+
+    For distorted predictions with squared fork height below 0.01 A^2,
+    a C1 height continuation and squared feasibility penalty extend the
+    objective outside the exact projector's domain. Ordinary carboxylates
+    use the exact fork geometry and pure harmonic coincidence energy.
+
+    Indices are absolute Boltz token indices. These tokens MUST be fixed
+    and featurized as HIS and ``acceptor_residue`` respectively, with the
+    standard contiguous ref_atoms layout. Unknown-token features cannot
+    be used for these side-chain projections.
+    """
+
+    his_token_index: int = eqx.field(static=True)
+    acceptor_token_index: int = eqx.field(static=True)
+    acceptor_residue: str = eqx.field(static=True, default="ASP")
+
+    def __post_init__(self):
+        if self.acceptor_residue not in ("ASP", "GLU"):
+            raise ValueError("acceptor_residue must be ASP or GLU")
+        if min(self.his_token_index, self.acceptor_token_index) < 0:
+            raise ValueError("Token indices must be nonnegative")
+        if self.his_token_index == self.acceptor_token_index:
+            raise ValueError("His and carboxylate must be distinct tokens")
+
+    def __call__(self, sequence, output: AbstractStructureOutput, key):
+        if output.structure_coordinates is None or output.features is None:
+            raise ValueError("His-carboxylate loss requires atom coordinates and features")
+        first = _first_atom_indices(jax.tree.map(lambda x: x[0], output.features))
+        if max(self.his_token_index, self.acceptor_token_index) >= first.shape[0]:
+            raise ValueError("His/carboxylate token index outside feature tokens")
+        x = output.structure_coordinates[0]
+        his_base = first[self.his_token_index]
+        acc_base = first[self.acceptor_token_index]
+        his_atoms = ref_atoms["HIS"]
+        acc_atoms = ref_atoms[self.acceptor_residue]
+        h_donor = project_his_donor_h_nd1(
+            *(x[his_base + his_atoms.index(name)] for name in ("ND1", "CG", "CE1"))
+        )
+        names = ("OD1", "CG", "OD2") if self.acceptor_residue == "ASP" else ("OE1", "CD", "OE2")
+        o1, carbon, o2 = (x[acc_base + acc_atoms.index(name)] for name in names)
+        midpoint = 0.5 * (o1 + o2)
+        oo = o2 - o1
+        axis = oo / jnp.sqrt(jnp.sum(oo * oo) + 1e-12)
+        outward = midpoint - carbon
+        outward = outward - jnp.dot(outward, axis) * axis
+        outward = outward / jnp.sqrt(jnp.sum(outward * outward) + 1e-12)
+        height_squared = ROSETTA_CARBOXYLATE_HIS_AH_DIS_A**2 - 0.25 * jnp.sum(oo * oo)
+        # C1 continuation of sqrt below a 0.1 A height: predicted diffusion
+        # geometries need not yet admit two 1.85 A O-H distances. Valid
+        # carboxylates use the exact construction; invalid ones remain finite
+        # and receive a restoring penalty instead of a silent NaN/zero loss.
+        eps = 0.01
+        height = jnp.where(height_squared >= eps,
+                           jnp.sqrt(jnp.maximum(height_squared, eps)),
+                           jnp.sqrt(eps) * jnp.exp(jnp.minimum((height_squared - eps) / (2 * eps), 0.0)))
+        h_acceptor = midpoint + height * outward
+        feasibility = jax.nn.relu(eps - height_squared) ** 2
+        delta = h_donor - h_acceptor
+        squared_gap = jnp.sum(delta * delta)
+        loss = 0.5 * squared_gap + feasibility
+        return loss, {
+            "his_carboxylate_loss": loss,
+            "his_carboxylate_gap_squared_A2": squared_gap,
+            "carboxylate_feasibility_penalty": feasibility,
+            "his_hd1_xyz": h_donor,
+            "carboxylate_target_xyz": h_acceptor,
+        }
+
+
 class HisHisHydrogenBondLoss(LossTerm):
     """Satisfaction loss for at least one NE2-donor to ND1-acceptor H-bond.
 
