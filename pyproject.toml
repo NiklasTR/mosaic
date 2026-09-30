@@ -6,10 +6,9 @@ readme = "README.md"
 authors = [
     { name = "Nick Boyd", email = "nick@escalante.bio" }
 ]
-requires-python = "==3.13.*"
+requires-python = "==3.12.*"
 dependencies = [
     "biopython>=1.84",
-    "biotite>=1.2",
     "dm-haiku>=0.0.13",
     "dm-tree>=0.1.9",
     "equinox>=0.13.0",
@@ -108,4 +107,4 @@ conflicts = [
 package = true
 # boltz (via joltz) pins scipy==1.13.1; mosaic stack uses scipy>=1.15.3.
 # These overrides apply when this directory is the uv project (uv sync here, or uv pip install --project packages/mosaic).
-override-dependencies = ["scipy>=1.15.3", "numpy>=1.26,<2.2", "gemmi>=0.7", "biotite>=1.2"]
+override-dependencies = ["scipy>=1.15.3", "numpy>=1.26,<2.2", "gemmi>=0.7"]

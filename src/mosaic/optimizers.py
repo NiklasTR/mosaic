@@ -264,6 +264,169 @@ def projection_simplex(V, z=1):
     return np.maximum(V - theta[:, np.newaxis], 0)
 
 
+@jax.jit
+def _fisher_mirror_step(logits, gradient, stepsize, entropy_coefficient):
+    """Euler in centered logits; exponentiated gradient in probabilities."""
+    updated = (1.0 + stepsize * entropy_coefficient) * logits - stepsize * gradient
+    return updated - updated.mean(axis=-1, keepdims=True)
+
+
+def fisher_mirror_descent(
+    *,
+    loss_function,
+    x,
+    n_steps: int,
+    stepsize: float,
+    stepsize_end: float | None = None,
+    entropy_coefficient: float = 0.0,
+    entropy_coefficient_end: float | None = None,
+    entropy_schedule_power: float = 1.0,
+    key=None,
+    max_gradient_norm: float | None = None,
+    design_mask=None,
+    initial_probability_floor: float = 1e-8,
+    trajectory_fn: Callable | None = None,
+):
+    """One uninterrupted stochastic Fisher--Rao/mirror flow on soft sequences.
+
+    The mean-field equation is dP/dt = -R_P(G - lambda * log(P)), where
+    R_P(f) = P * (f - sum(P * f, axis=-1)). Each iteration evaluates the
+    existing probability-gradient oracle at P = softmax(Z), clips its global
+    norm, and takes Z <- center((1 + h * lambda) * Z - h * G). There is no
+    momentum, simplex projection, or restart from an incumbent.
+
+    ``x`` is an N x K probability matrix. Only designable rows are smoothed
+    once at initialization if entries fall below ``initial_probability_floor``;
+    fixed rows are returned and passed to the oracle exactly as supplied.
+    Zeros caused by softmax underflow do not overwrite the stored logits.
+
+    For n_steps > 1, u = step / (n_steps - 1) and S = u**2 * (3 - 2*u).
+    The stepsize interpolates its endpoints using S; the entropy coefficient
+    uses S**entropy_schedule_power. A one-step run uses the starting values.
+    Positive entropy coefficients encourage concentration. Endpoints default
+    to their starting values, giving a constant schedule.
+
+    Returns (final_pssm, best_evaluated_pssm). The final post-update PSSM has
+    not been evaluated; there are exactly n_steps oracle calls. Best tracking
+    is observational and pairs each value with its actual pre-update input.
+    With zero steps both returns are the initialized PSSM.
+
+    If supplied, trajectory_fn(record) runs once per update and its return
+    values are collected as a third return value. Records contain pre- and
+    post-update logits/PSSMs, the key used, processed gradient, schedules,
+    pre-update loss/diagnostics and auxiliary loss outputs. This differs from
+    simplex_APGM's two-argument callback. No full trajectory is retained when
+    trajectory_fn is None. Loss-module state is not updated between steps.
+    """
+    if isinstance(n_steps, bool) or not isinstance(n_steps, (int, np.integer)) or n_steps < 0:
+        raise ValueError("n_steps must be a nonnegative integer")
+    initial = np.asarray(x, dtype=np.float32)
+    if initial.ndim != 2 or initial.shape[0] == 0 or initial.shape[1] < 2:
+        raise ValueError("x must be a nonempty N x K probability matrix with K >= 2")
+    if (not np.isfinite(initial).all() or (initial < 0).any()
+            or not np.allclose(initial.sum(-1), 1.0, atol=1e-6, rtol=1e-5)):
+        raise ValueError("x must have finite nonnegative entries and rows summing to one")
+    if design_mask is None:
+        mask = np.ones(initial.shape[0], dtype=bool)
+    else:
+        mask = np.asarray(design_mask)
+        if mask.shape != (initial.shape[0],) or mask.dtype != np.bool_:
+            raise ValueError("design_mask must be a boolean vector with one entry per row")
+
+    stepsize_end = stepsize if stepsize_end is None else stepsize_end
+    entropy_coefficient_end = (
+        entropy_coefficient if entropy_coefficient_end is None else entropy_coefficient_end
+    )
+    max_gradient_norm = np.sqrt(initial.shape[0]) if max_gradient_norm is None else max_gradient_norm
+    for name, value in (
+        ("stepsize", stepsize), ("stepsize_end", stepsize_end),
+        ("max_gradient_norm", max_gradient_norm),
+        ("entropy_schedule_power", entropy_schedule_power),
+        ("initial_probability_floor", initial_probability_floor),
+    ):
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive")
+    if initial_probability_floor >= 1.0 / initial.shape[1]:
+        raise ValueError("initial_probability_floor must be less than 1 / K")
+    for name, value in (
+        ("entropy_coefficient", entropy_coefficient),
+        ("entropy_coefficient_end", entropy_coefficient_end),
+    ):
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+
+    if key is None:
+        key = jax.random.key(np.random.randint(0, 10000))
+    fixed = jnp.asarray(initial)
+    active = jnp.asarray(mask[:, None])
+    initial_logits = jnp.log(jnp.maximum(fixed, initial_probability_floor))
+    logits = jnp.where(active, initial_logits - initial_logits.mean(-1, keepdims=True), 0.0)
+
+    def probabilities(z):
+        return jnp.where(active, jax.nn.softmax(z, axis=-1), fixed)
+
+    best_x = probabilities(logits)
+    best_val = np.inf
+    trajectory = []
+    flow_time = 0.0
+    for step in range(n_steps):
+        start_time = time.time()
+        u = step / (n_steps - 1) if n_steps > 1 else 0.0
+        smooth = u * u * (3.0 - 2.0 * u)
+        h = float(stepsize + (stepsize_end - stepsize) * smooth)
+        lam = float(entropy_coefficient + (entropy_coefficient_end - entropy_coefficient)
+                    * smooth ** entropy_schedule_power)
+        pssm = probabilities(logits)
+        (value, loss_aux), gradient = _eval_loss_and_grad(loss_function, pssm, key)
+        gradient = jnp.where(active, gradient, 0.0)
+        # Accumulate in float64 on the host, avoiding overflow when the oracle
+        # has replaced an infinity with a large finite float32 value.
+        gradient_norm = float(np.linalg.norm(np.asarray(gradient, dtype=np.float64)))
+        if not np.isfinite(gradient_norm):
+            raise FloatingPointError("Fisher oracle returned a non-finite gradient")
+        clip_factor = min(1.0, float(max_gradient_norm) / gradient_norm) if gradient_norm else 1.0
+        gradient = gradient * clip_factor
+
+        is_best = bool(np.isfinite(value) and value < best_val)
+        if is_best:
+            best_val = float(value)
+            best_x = pssm
+
+        next_logits = jnp.where(active, _fisher_mirror_step(logits, gradient, h, lam), 0.0)
+        if not bool(jnp.isfinite(next_logits).all()):
+            raise FloatingPointError("Fisher logits overflowed; reduce stepsize or entropy coefficient")
+        next_pssm = probabilities(next_logits)
+        # xlogy defines 0 * log(0) as zero, including fixed one-hot rows.
+        entropy = -jax.scipy.special.xlogy(pssm, pssm).sum(-1)
+        active_count = max(int(mask.sum()), 1)
+        mean_entropy = (entropy * jnp.asarray(mask)).sum() / active_count
+        mean_max = (pssm.max(-1) * jnp.asarray(mask)).sum() / active_count
+        affinity = jnp.clip((jnp.sqrt(pssm) * jnp.sqrt(next_pssm)).sum(-1), 0.0, 1.0)
+        fisher_distance = jnp.linalg.norm(2.0 * jnp.arccos(affinity) * jnp.asarray(mask))
+        diagnostics = {
+            "loss": value, "entropy": mean_entropy, "mean_max_probability": mean_max,
+            "stepsize": h, "entropy_coefficient": lam,
+            "gradient_norm": gradient_norm, "clip_factor": clip_factor,
+            "fisher_distance": fisher_distance, "time": time.time() - start_time,
+        }
+        if trajectory_fn is not None:
+            record = {
+                **diagnostics, "step": step, "flow_time": flow_time,
+                "key": jax.random.key_data(key), "key_impl": str(jax.random.key_impl(key)),
+                "logits": logits, "pssm": pssm, "gradient": gradient,
+                "next_logits": next_logits, "next_pssm": next_pssm,
+                "is_best": is_best, "best_loss": best_val, "aux": loss_aux,
+            }
+            trajectory.append(trajectory_fn(record))
+        _print_iter(step, {**diagnostics, "": loss_aux}, value)
+        logits = next_logits
+        flow_time += h
+        key = jax.random.fold_in(key, 0)
+
+    result = (probabilities(logits), best_x)
+    return (*result, trajectory) if trajectory_fn is not None else result
+
+
 def simplex_APGM(
     *,
     loss_function,

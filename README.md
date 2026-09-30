@@ -443,4 +443,3 @@ Typically $\ell$ is formed by a single neural network (or an ensemble of the sam
 This kind of modular implementation of loss terms is also useful with modern RL-based alignment of generative models approaches: these forms of alignment can often be seen as _amortized optimization_. Typically, they train a generative model to minimize some combination of KL divergence minus a loss function, which can be a combination of in-silico predictors. Another use case is to provide guidance to discrete diffusion or flow models. 
 
 [^1]: This requires us to treat neural networks as _simple parametric functions_ that can be combined programatically; **not** as complicated software packages that require large libraries (e.g. PyTorch lightning), bash scripts, or containers as is common practice in BioML. 
-

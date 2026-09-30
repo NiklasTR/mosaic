@@ -70,7 +70,7 @@ def main(cfg: DictConfig) -> None:
     from mosaic.losses.protein_mpnn import InverseFoldingSequenceRecovery
     from mosaic.losses.transformations import NoCys, NoCysScaffoldBinder, ScaffoldBinderSequence
     from mosaic.models.boltz2 import Boltz2
-    from mosaic.optimizers import simplex_APGM
+    from mosaic.cli.binder_optimization import optimize_binder_sequence
     from mosaic.proteinmpnn.mpnn import load_mpnn_sol
     from mosaic.structure_prediction import TargetChain
 
@@ -79,6 +79,11 @@ def main(cfg: DictConfig) -> None:
         return "".join(TOKENS[int(i)] for i in idx)
 
     OmegaConf.resolve(cfg)
+    optimizer_method = str(cfg.optimizer.get("method", "three_phase"))
+    if optimizer_method not in ("three_phase", "fisher"):
+        raise ValueError(
+            f"Unknown optimizer.method {optimizer_method!r}; expected 'three_phase' or 'fisher'"
+        )
     out = Path(HydraConfig.get().runtime.output_dir)
     _hc = HydraConfig.get()
     _LOG.info(
@@ -261,8 +266,9 @@ def main(cfg: DictConfig) -> None:
         if w_cys != 0.0:
             add_weighted(
                 w_cys,
-                sp.ExpectedCysteineCountLoss(
-                    target_expected_cys=float(2 * disulfide_pairs),
+                sp.ExpectedResidueCountLoss(
+                    residue="C",
+                    target_expected_count=float(2 * disulfide_pairs),
                 ),
             )
 
@@ -306,8 +312,6 @@ def main(cfg: DictConfig) -> None:
     loss = loss_inner
 
     opt = cfg.optimizer
-    sqrt_l = float(np.sqrt(binder_length))
-    mgn = float(opt.max_gradient_norm)
 
     if bool(cfg.ranking.enabled):
 
@@ -396,61 +400,10 @@ def main(cfg: DictConfig) -> None:
                     jax.lax.stop_gradient(scaffold_20),
                 )
 
-        if n_done == 0:
-            _LOG.info(
-                "simplex_APGM phase1: n_steps=%s stepsize=%s momentum=%s scale=%s max_grad_norm=%s",
-                int(opt.phase1_n_steps),
-                float(opt.phase1_stepsize_factor) * sqrt_l,
-                float(opt.phase1_momentum),
-                float(opt.phase1_scale),
-                mgn,
-            )
-        _, pssm = simplex_APGM(
-            loss_function=loss,
-            x=x0,
-            n_steps=int(opt.phase1_n_steps),
-            stepsize=float(opt.phase1_stepsize_factor) * sqrt_l,
-            momentum=float(opt.phase1_momentum),
-            scale=float(opt.phase1_scale),
-            logspace=False,
-            max_gradient_norm=mgn,
-            key=jax.random.fold_in(ik, 811),
-        )
-        if n_done == 0:
-            _LOG.info(
-                "simplex_APGM phase2: n_steps=%s stepsize=%s scale=%s logspace=True",
-                int(opt.phase2_n_steps),
-                float(opt.phase2_stepsize_factor) * sqrt_l,
-                float(opt.phase2_scale),
-            )
-        _, pssm = simplex_APGM(
-            loss_function=loss,
-            x=jnp.log(pssm + 1e-5),
-            n_steps=int(opt.phase2_n_steps),
-            stepsize=float(opt.phase2_stepsize_factor) * sqrt_l,
-            momentum=float(opt.phase2_momentum),
-            scale=float(opt.phase2_scale),
-            logspace=True,
-            max_gradient_norm=mgn,
-            key=jax.random.fold_in(ik, 812),
-        )
-        if n_done == 0:
-            _LOG.info(
-                "simplex_APGM phase3: n_steps=%s stepsize=%s scale=%s logspace=True",
-                int(opt.phase3_n_steps),
-                float(opt.phase3_stepsize_factor) * sqrt_l,
-                float(opt.phase3_scale),
-            )
-        _, pssm = simplex_APGM(
-            loss_function=loss,
-            x=jnp.log(pssm + 1e-5),
-            n_steps=int(opt.phase3_n_steps),
-            stepsize=float(opt.phase3_stepsize_factor) * sqrt_l,
-            momentum=float(opt.phase3_momentum),
-            scale=float(opt.phase3_scale),
-            logspace=True,
-            max_gradient_norm=mgn,
-            key=jax.random.fold_in(ik, 813),
+        pssm = optimize_binder_sequence(
+            loss=loss, x=x0, optimizer=opt, key=ik,
+            design_mask=design_mask_jnp,
+            trajectory_path=out / f"fisher_trajectory_{n_done:04d}.npz",
         )
 
         if disulfide_pairs == 0:

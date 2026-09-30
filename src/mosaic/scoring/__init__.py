@@ -2,8 +2,8 @@ from .base import ScoreTerm
 from .cysteine_disulfide import (
     CysteineDisulfideScore,
     count_cysteines_in_sequence,
-    detect_disulfide_bonds_biotite,
-    load_atom_array_mmcif,
+    detect_disulfide_bonds,
+    load_structure_model,
     smallest_peptide_chain_id,
 )
 from .evoef_binding import (
@@ -27,8 +27,8 @@ __all__ = [
     "HBplusScore",
     "ScoreTerm",
     "count_cysteines_in_sequence",
-    "detect_disulfide_bonds_biotite",
-    "load_atom_array_mmcif",
+    "detect_disulfide_bonds",
+    "load_structure_model",
     "smallest_peptide_chain_id",
     "count_hbonds_inter_intra_chain_from_hb2",
     "parse_binding_total_from_evoef_stdout",

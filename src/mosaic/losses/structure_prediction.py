@@ -253,10 +253,19 @@ class BinderTargetContact(LossTerm):
         return -average_log_prob, {"target_contact": average_log_prob}
 
 
-class ExpectedCysteineCountLoss(LossTerm):
-    """Penalize squared deviation of summed soft cysteine probability from a target count."""
+class ExpectedResidueCountLoss(LossTerm):
+    """Penalize soft residue count vs a target.
 
-    target_expected_cys: float
+    Exact mode (``at_least=False``, default): ``(expected - target)^2``.
+    Satisfaction mode (``at_least=True``): ``relu(target - expected)^2`` --
+    shortfall below ``target`` is penalized, extra copies are free.
+    E.g. ``residue="H", target_expected_count=2.0, at_least=True`` means
+    "at least 2 histidines".
+    """
+
+    residue: str = "C"
+    target_expected_count: float = 0.0
+    at_least: bool = False
 
     def __call__(
         self,
@@ -264,11 +273,16 @@ class ExpectedCysteineCountLoss(LossTerm):
         output: AbstractStructureOutput,
         key,
     ):
-        cys = TOKENS.index("C")
-        expected = sequence[:, cys].sum()
-        err = expected - jnp.array(self.target_expected_cys, dtype=expected.dtype)
-        sq = err * err
-        return sq, {"expected_cys": expected, "cys_count_sqerr": sq}
+        idx = TOKENS.index(self.residue)
+        expected = sequence[:, idx].sum()
+        tgt = jnp.asarray(self.target_expected_count, dtype=expected.dtype)
+        if self.at_least:
+            shortfall = jax.nn.relu(tgt - expected)
+            sq = shortfall * shortfall
+        else:
+            err = expected - tgt
+            sq = err * err
+        return sq, {f"expected_{self.residue}": expected, "residue_count_sqerr": sq}
 
 
 class HelixLoss(LossTerm):
